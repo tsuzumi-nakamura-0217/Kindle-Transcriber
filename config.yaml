@@ -1,0 +1,22 @@
+# Kindle Transcriber 設定ファイル
+
+# ページ設定
+total_pages: 100          # 書籍のページ総数（--pages オプションで上書き可）
+start_page: 1             # 開始ページ番号（途中再開時に変更）
+page_turn_delay: 1.5      # ページめくり後の待機時間（秒）。表示が遅い場合は増やす
+
+# キャプチャ設定
+capture_region: auto      # auto=Kindleウィンドウを自動検出 / 手動: {left: 0, top: 0, width: 1200, height: 800}
+
+# OCR 設定
+language: auto            # auto / ja / en
+vertical_text: false      # 縦書き書籍の場合は true に設定
+confidence_threshold: 0.3 # OCR 信頼度の閾値（0.0〜1.0）。低い結果は警告としてログに記録
+
+# 出力設定
+output_dir: output        # 出力ディレクトリ（スクリプトからの相対パス）
+save_screenshots: true    # スクリーンショットを保存するか（再処理のために推奨）
+
+# デバッグ設定
+verbose: false            # 詳細ログを表示するか
+dry_run: false            # true にするとスクリーンショットのみ撮影してOCRをスキップ
