@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# 仮想環境
+.env
+
+# Kindle Transcriber 出力
+output/screenshots/*.png
+output/*.md
+output/.*.json
+
+# macOS
+.DS_Store
+
+# Gitコミットメッセージ
+./GIT_COMMIT_MESSAGE.md
