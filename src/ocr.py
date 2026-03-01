@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from PIL import Image
+from ocrmac.ocrmac import text_from_image as _ocrmac_recognize
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +43,6 @@ def run_ocr(
         vertical_text: True の場合、縦書き用にブロックの並び替えを行う
         confidence_threshold: 信頼度の閾値。これ以下のブロックは警告ログに記録
     """
-    try:
-        import ocrmac
-    except ImportError:
-        raise ImportError(
-            "ocrmac がインストールされていません。`pip install ocrmac` を実行してください。"
-        )
-
     # ocrmac は PIL Image を直接受け取れないため一時 PNG に保存
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         tmp_path = Path(tmp.name)
@@ -57,11 +51,14 @@ def run_ocr(
     try:
         # 言語指定
         lang_codes = _resolve_language_codes(language)
-        annotations = ocrmac.OCR(
+        # text_from_image は (text, confidence, bbox_tuple) のリストを返す
+        annotations = _ocrmac_recognize(
             str(tmp_path),
             language_preference=lang_codes,
-            framework="vision",
-        ).recognize()
+            recognition_level="accurate",
+            confidence_threshold=0.0,
+            detail=True,
+        )
     except Exception as e:
         logger.error(f"[Page {page_number}] OCR 実行エラー: {e}")
         return OcrResult(page_number=page_number, text="", confidence=0.0)
@@ -75,12 +72,10 @@ def run_ocr(
     # 結果を座標順に並び替えて読み順を保持
     sorted_blocks = _sort_blocks(annotations, vertical=vertical_text)
 
-    texts: list[str] = []
     confidences: list[float] = []
     low_conf_blocks: list = []
 
     for block in sorted_blocks:
-        # ocrmac のブロック形式: (text, confidence, bounding_box)
         text, conf, bbox = block[0], block[1], block[2]
         confidences.append(conf)
         if conf < confidence_threshold:
@@ -88,10 +83,11 @@ def run_ocr(
             logger.debug(
                 f"[Page {page_number}] 低信頼度ブロック (conf={conf:.2f}): {text!r}"
             )
-        texts.append(text)
 
     avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
-    full_text = "\n".join(texts)
+
+    # bbox の垂直間隔で段落を判定しながらテキストを結合
+    full_text = _merge_blocks_to_text(sorted_blocks, vertical=vertical_text)
 
     if low_conf_blocks:
         logger.warning(
@@ -124,6 +120,62 @@ def _resolve_language_codes(language: str) -> list[str]:
     return mapping.get(language, ["ja-JP", "en-US"])
 
 
+def _merge_blocks_to_text(blocks: list, vertical: bool = False) -> str:
+    """
+    ソート済み OCR ブロックを段落を考慮してテキストに結合する。
+
+    bbox (x, y, width, height) の垂直間隔を測定して:
+    - 同一行 (y がほぼ同じ)          → スペースなしで連結
+    - 次の行 (間隔 ≒ 行高さ)         → 同一段落として直接連結（日本語はスペース不要）
+    - 段落区切り (間隔 > 行高さ×閾値) → \\n\\n で分割
+
+    Apple Vision の座標系: 左下原点、y は上に向かって増加。
+    bbox の y は BOX の下端、y+height が上端。
+    """
+    if not blocks:
+        return ""
+
+    parts: list[str] = []
+
+    for i, block in enumerate(blocks):
+        text = block[0].strip()
+        if not text:
+            continue
+
+        if not parts:
+            parts.append(text)
+            continue
+
+        prev_block = blocks[i - 1]
+        prev_bbox = prev_block[2]  # (x, y, w, h)
+        curr_bbox = block[2]
+
+        # 行高さの基準（前後ブロックの平均高さ）
+        avg_line_height = (prev_bbox[3] + curr_bbox[3]) / 2
+
+        # 垂直方向の間隔
+        # Apple Vision: y の値が大きい = 画面上側 (y=1.0 が上端)
+        # prev_block の下端 = prev_bbox[1]
+        # curr_block の上端 = curr_bbox[1] + curr_bbox[3]
+        prev_bottom = prev_bbox[1]
+        curr_top = curr_bbox[1] + curr_bbox[3]
+
+        # gap > 0 のとき 2 ブロック間に空白あり
+        gap = prev_bottom - curr_top
+
+        # 同一行判定（垂直方向にほぼ重なる → x 方向に並ぶ複数ブロック）
+        if gap < -avg_line_height * 0.3:
+            parts.append(" " + text)
+        # 段落区切り判定（行間の 1.2 倍以上の間隔）
+        elif gap > avg_line_height * 1.2:
+            parts.append("\n\n" + text)
+        # 通常の行継続（同一段落内の折り返し）→ そのまま結合（日本語はスペース不要）
+        else:
+            parts.append(text)
+
+    return "".join(parts)
+
+
 def _sort_blocks(blocks: list, vertical: bool = False) -> list:
     """
     テキストブロックを読み順にソートする。
@@ -131,25 +183,23 @@ def _sort_blocks(blocks: list, vertical: bool = False) -> list:
     横書き: Y 座標（上→下）→ X 座標（左→右）
     縦書き: X 座標（右→左）→ Y 座標（上→下）
 
-    bounding_box は ocrmac では [(x1,y1),(x2,y2),(x3,y3),(x4,y4)] の形式で
-    正規化座標（0〜1）として提供される。
+    bounding_box は ocrmac では (x, y, width, height) の正規化座標タプル。
+    Apple Vision の座標系: 左下が原点 (0, 0)、右上が (1, 1)。
+    よって Y 値が大きいほど画面上部にある。
     """
-    def _top_left(block):
-        bbox = block[2]  # [(x1,y1), ...]
-        # 正規化座標の左上を取得（Y は上が 1.0）
-        xs = [p[0] for p in bbox]
-        ys = [p[1] for p in bbox]
-        x_min = min(xs)
-        y_max = max(ys)  # Vision の Y は下が 0、上が 1
-        return (x_min, y_max)
-
-    try:
+    def _sort_key(block):
+        bbox = block[2]  # (x, y, width, height)
+        x, y = bbox[0], bbox[1]
+        # y は左下基準なので、上にあるほど y が大きい
         if vertical:
             # 縦書き: X 降順（右→左）→ Y 降順（上→下）
-            return sorted(blocks, key=lambda b: (-_top_left(b)[0], -_top_left(b)[1]))
+            return (-x, -y)
         else:
             # 横書き: Y 降順（上→下）→ X 昇順（左→右）
-            return sorted(blocks, key=lambda b: (-_top_left(b)[1], _top_left(b)[0]))
+            return (-y, x)
+
+    try:
+        return sorted(blocks, key=_sort_key)
     except (IndexError, TypeError) as e:
         logger.warning(f"ブロックのソートに失敗、元の順序を使用します: {e}")
         return blocks
