@@ -18,11 +18,19 @@ KINDLE_APP_NAME = "Kindle"
 
 def bring_kindle_to_front() -> bool:
     """Kindle for Mac をフォアグラウンドにフォーカスする。"""
-    script = f'tell application "{KINDLE_APP_NAME}" to activate'
+    # App Store 版 Kindle は tell application で直接操作できないため
+    # System Events 経由で frontmost を設定する
+    script = 'tell application "System Events" to tell process "Kindle" to set frontmost to true'
     result = _run_applescript(script)
     if result is None:
-        logger.error("Kindle を起動できませんでした。Kindle for Mac がインストールされているか確認してください。")
-        return False
+        # フォールバック: open コマンドで起動を試みる
+        logger.warning("System Events 経由のフォーカスに失敗。open コマンドで起動を試みます。")
+        try:
+            subprocess.run(["open", "-a", KINDLE_APP_NAME], check=True, timeout=10)
+            time.sleep(2.0)
+        except subprocess.CalledProcessError:
+            logger.error("Kindle を起動できませんでした。Kindle for Mac がインストールされているか確認してください。")
+            return False
     time.sleep(0.5)  # アクティベーション待ち
     return True
 
@@ -40,16 +48,19 @@ def get_kindle_window_bounds() -> Optional[dict]:
     Returns:
         {"left": int, "top": int, "width": int, "height": int} または None
     """
-    script = """
-    tell application "System Events"
-        tell process "Kindle"
-            set win to front window
-            set pos to position of win
-            set sz to size of win
-            return (item 1 of pos as string) & "," & (item 2 of pos as string) & "," & (item 1 of sz as string) & "," & (item 2 of sz as string)
-        end tell
-    end tell
-    """
+    script = "\n".join([
+        'tell application "System Events"',
+        '    tell process "Kindle"',
+        '        set pos to position of front window',
+        '        set sz to size of front window',
+        '        set x to item 1 of pos',
+        '        set y to item 2 of pos',
+        '        set w to item 1 of sz',
+        '        set h to item 2 of sz',
+        '        return (x as string) & "," & (y as string) & "," & (w as string) & "," & (h as string)',
+        '    end tell',
+        'end tell',
+    ])
     result = _run_applescript(script)
     if result is None:
         logger.warning("Kindle ウィンドウの座標を取得できませんでした。")
